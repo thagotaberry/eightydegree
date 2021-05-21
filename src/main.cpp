@@ -5,7 +5,8 @@
 #define BUTTON_PIN 12
 #define SERVO_PIN 3
 #define PEEP_PIN 7
-#define NTC_PIN A0
+#define NTC_PIN_PRIME A0
+#define NTC_PIN_SECOND A4
 #define LED_ON HIGH
 #define LED_OFF LOW
 #define SERV_ON_ANGLE 164
@@ -18,12 +19,16 @@
 Servo theservo;
 int button_state = 0;
 int button_pause = 0;
-int ntc_voltage = 0;
+int ntc_voltage_prime = 0;
+int ntc_voltage_second = 0;
 int delay_mill = 400;
 
 
 enum State {SETUP, FIRST_HEATING, FIRST_SETTLING, HEATING, COOLING};
 State state = SETUP;
+
+enum Mode {DEBUG, NORMAL};
+Mode mode = NORMAL;
 
 unsigned long now;
 unsigned long last_time = 0;
@@ -73,14 +78,17 @@ void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
   pinMode(BUTTON_PIN, INPUT);
   
-  ntc_voltage = analogRead(NTC_PIN);
-  temperature = coeff_4 * pow(ntc_voltage, 4)
-              + coeff_3 * pow(ntc_voltage, 3)
-              + coeff_2 * pow(ntc_voltage, 2)
-              + coeff_1 * ntc_voltage
+  ntc_voltage_prime = analogRead(NTC_PIN_PRIME);
+  ntc_voltage_second = analogRead(NTC_PIN_SECOND);
+
+  temperature = coeff_4 * pow(ntc_voltage_prime, 4)
+              + coeff_3 * pow(ntc_voltage_prime, 3)
+              + coeff_2 * pow(ntc_voltage_prime, 2)
+              + coeff_1 * ntc_voltage_prime
               + coeff_0;
 
   digitalWrite(LED_BUILTIN, LED_OFF);
+  mode = DEBUG; // <----------------------------------------------- change here
 }
 
 void loop() {
@@ -88,112 +96,126 @@ void loop() {
   if (now > (last_time + 250) || now < last_time) {
 
     /* get new temperature: */
-    ntc_voltage = analogRead(NTC_PIN);
+    ntc_voltage_prime = analogRead(NTC_PIN_PRIME);
+    ntc_voltage_second = analogRead(NTC_PIN_SECOND);
     last_temperature = temperature;
-    temperature = coeff_4 * pow(ntc_voltage, 4)
-                + coeff_3 * pow(ntc_voltage, 3)
-                + coeff_2 * pow(ntc_voltage, 2)
-                + coeff_1 * ntc_voltage
+    temperature = coeff_4 * pow(ntc_voltage_prime, 4)
+                + coeff_3 * pow(ntc_voltage_prime, 3)
+                + coeff_2 * pow(ntc_voltage_prime, 2)
+                + coeff_1 * ntc_voltage_prime
                 + coeff_0;
     temperature = (last_temperature + temperature) / 2;
-    Serial.println(temperature);
+    // Serial.println(temperature);
     
-    /* reset statemachine if button is pressed: */
-
-    button_state = digitalRead(BUTTON_PIN);
-    if (button_pause == 0 && button_state == 0){
-      state = SETUP;
-      button_pause = 1;
-    }
-    else if (button_pause == 1 && button_state == 1){
-      button_pause = 0;
-    }
-
-    
-    /* statemachine: */
-    switch (state)
+    switch(mode)
     {
-    case SETUP:
-      Serial.println("SETUP");
-
-      theservo.write(SERV_ON_ANGLE);
-      delay(delay_mill);
-      theservo.write(SERV_STDBY_ANGLE);
-
-      state = FIRST_HEATING;
+    case DEBUG:
+      Serial.println("ntc_voltage_prime ntc_voltage_second"); // temperature");
+      Serial.print(String(ntc_voltage_prime) + String(" "));
+      Serial.println(String(ntc_voltage_second));
+      //Serial.print(String(temperature) + String(" "));
       break;
+
+    case NORMAL:
+      /* reset statemachine if button is pressed: */
+      button_state = digitalRead(BUTTON_PIN);
+      if (button_pause == 0 && button_state == 0){
+        state = SETUP;
+        button_pause = 1;
+      }
+      else if (button_pause == 1 && button_state == 1){
+        button_pause = 0;
+      }
+
       
-    case FIRST_HEATING:
-      digitalWrite(LED_BUILTIN, LED_ON);
-      Serial.println("FIRST_HEATING");
-      if (temperature > 76.0){
+      /* statemachine: */
+      switch (state)
+      {
+      case SETUP:
+        Serial.println("SETUP");
 
-        theservo.write(SERV_OFF_ANGLE);
-        delay(delay_mill);
-        theservo.write(SERV_STDBY_ANGLE);
-        digitalWrite(PEEP_PIN,HIGH);
-        delay(1000);
-        digitalWrite(PEEP_PIN,LOW);
-
-        state = FIRST_SETTLING; 
-      }
-      break;
-
-    case FIRST_SETTLING:
-      digitalWrite(LED_BUILTIN, LED_OFF);
-      Serial.println("FIRST_SETTLING");
-      if (temperature > 80.0){
-
-        theservo.write(SERV_OFF_ANGLE);
+        theservo.write(SERV_ON_ANGLE);
         delay(delay_mill);
         theservo.write(SERV_STDBY_ANGLE);
 
-        state = COOLING; 
-      }
-      if(temperature < 76.0){
+        state = FIRST_HEATING;
+        break;
         
-        theservo.write(SERV_ON_ANGLE);
-        delay(delay_mill);
+      case FIRST_HEATING:
+        digitalWrite(LED_BUILTIN, LED_ON);
+        Serial.println("FIRST_HEATING");
+        if (temperature > 76.0){
+
+          theservo.write(SERV_OFF_ANGLE);
+          delay(delay_mill);
+          theservo.write(SERV_STDBY_ANGLE);
+          digitalWrite(PEEP_PIN,HIGH);
+          delay(1000);
+          digitalWrite(PEEP_PIN,LOW);
+
+          state = FIRST_SETTLING; 
+        }
+        break;
+
+      case FIRST_SETTLING:
+        digitalWrite(LED_BUILTIN, LED_OFF);
+        Serial.println("FIRST_SETTLING");
+        if (temperature > 80.0){
+
+          theservo.write(SERV_OFF_ANGLE);
+          delay(delay_mill);
+          theservo.write(SERV_STDBY_ANGLE);
+
+          state = COOLING; 
+        }
+        if(temperature < 76.0){
+          
+          theservo.write(SERV_ON_ANGLE);
+          delay(delay_mill);
+          theservo.write(SERV_STDBY_ANGLE);
+
+          state = HEATING;
+        }
+        break;
+      
+      case COOLING:
+        digitalWrite(LED_BUILTIN, LED_OFF);
+        Serial.println("COOLING");
+        if (temperature < LOW_BOUND){
+
+          theservo.write(SERV_ON_ANGLE);
+          delay(delay_mill);
+          theservo.write(SERV_STDBY_ANGLE);
+
+          state = HEATING; 
+        }
+        break;
+
+      case HEATING:
+        digitalWrite(LED_BUILTIN, LED_ON);
+        Serial.println("HEATING");
+        if (temperature > HIGH_BOUND){
+
+          theservo.write(SERV_OFF_ANGLE);
+          delay(delay_mill);
+          theservo.write(SERV_STDBY_ANGLE);
+
+          state = COOLING; 
+        }
+        break;
+
+      default:
         theservo.write(SERV_STDBY_ANGLE);
-
-        state = HEATING;
+        Serial.println("default (ERROR)");
+        break;
       }
-      break;
-    
-    case COOLING:
-      digitalWrite(LED_BUILTIN, LED_OFF);
-      Serial.println("COOLING");
-      if (temperature < LOW_BOUND){
 
-        theservo.write(SERV_ON_ANGLE);
-        delay(delay_mill);
-        theservo.write(SERV_STDBY_ANGLE);
-
-        state = HEATING; 
-      }
-      break;
-
-    case HEATING:
-      digitalWrite(LED_BUILTIN, LED_ON);
-      Serial.println("HEATING");
-      if (temperature > HIGH_BOUND){
-
-        theservo.write(SERV_OFF_ANGLE);
-        delay(delay_mill);
-        theservo.write(SERV_STDBY_ANGLE);
-
-        state = COOLING; 
-      }
-      break;
-
-    default:
-      theservo.write(SERV_STDBY_ANGLE);
-      Serial.println("default (ERROR)");
       break;
     }
     
     
     last_time = now;
-    Serial.println(String("time left: ") + String(200 - (millis() - now)));
+
+    // Serial.println(String("time left: ") + String(200 - (millis() - now)));
   }
 }

@@ -1,7 +1,9 @@
 #include <Arduino.h>
 #include <Servo.h>
 
+// #define DEBUG_LOG
 
+/* hardware definitions: */
 #define BUTTON_PIN 12
 #define SERVO_PIN 3
 #define PEEP_PIN 7
@@ -13,8 +15,14 @@
 #define SERV_STDBY_ANGLE 145
 #define SERV_OFF_ANGLE 125
 
-#define LOW_BOUND 79.3
-#define HIGH_BOUND 79.5
+/* control switching boundaries: */
+#define LOW_BOUND 79.6
+#define HIGH_BOUND 80
+#define FIRST_HEATING_BOUND 76.5
+#define FIRST_SETTLING_HIGH_BOUND 80.0
+#define FIRST_SETTLING_LOW_BOUND 76.0
+#define HEATING_CNT_NUMBER 6 // 1.5 seconds
+#define AFTER_HEAT_WAIT_CNT_NUMBER 24 // 6 seconds
 
 Servo theservo;
 int button_state = 0;
@@ -22,9 +30,11 @@ int button_pause = 0;
 int ntc_voltage_prime = 0;
 int ntc_voltage_second = 0;
 int delay_mill = 400;
+int heating_cnt = 0;
+int after_heating_wait_cnt = 0;
 
 
-enum State {SETUP, FIRST_HEATING, FIRST_SETTLING, HEATING, COOLING};
+enum State {SETUP, FIRST_HEATING, FIRST_SETTLING, HEATING, COOLING, AFTER_HEAT_WAITING};
 State state = SETUP;
 
 enum Mode {DEBUG, NORMAL};
@@ -34,24 +44,41 @@ unsigned long now;
 unsigned long last_time = 0;
 
 
-// in voltage:
-// y = 1.4214x4 - 13.945x3 + 50.042x2 - 96.803x + 115.36
-//const double coeff_4 = 1.4214;
-//const double coeff_3 = -13.945;
-//const double coeff_2 = 50.042;
-//const double coeff_1 = -96.803;
-//const double coeff_0 = 115.36;
-
 // in code direct:
-// y = 6.88934E-10x4 - 1.44055E-06x3 + 1.10170E-03x2 - 4.54209E-01x + 1.15360E+02
-const double coeff_4 = 6.88934E-10;
-const double coeff_3 = -1.44055E-06;
-const double coeff_2 = 1.10170E-03;
-const double coeff_1 = -4.54209E-01;
-const double coeff_0 = 1.15360E+02;
+// range 22.3 (553) ... 49.8 (262): y = -0.0935x + 73.687
+// range 49.9 (261) ... 100 (51): y = -30.66ln(x) + 220.69
+const double coeff_1_low_range = -0.0935;
+const double coeff_0_low_range = 73.687;
+const double factor_high_range = -30.66;
+const double offset_high_range = 220.69;
 
-double temperature = 0;
-double last_temperature = 0;
+
+double temperature_prime = 0;
+double temperature_second = 0;
+double last_temperature_prime = 0;
+double last_temperature_second = 0;
+
+
+double volt_to_temp(int ntc_value){
+  double temperature;
+    if(ntc_value > 261) /* low range */
+      temperature = coeff_1_low_range * ntc_value + coeff_0_low_range;
+    else /* high range */
+      temperature = factor_high_range * log(ntc_value) + offset_high_range;
+    return temperature;
+}
+
+void heater_on(){
+  theservo.write(SERV_ON_ANGLE);
+  delay(delay_mill);
+  theservo.write(SERV_STDBY_ANGLE);
+}
+
+void heater_off(){
+  theservo.write(SERV_OFF_ANGLE);
+  delay(delay_mill);
+  theservo.write(SERV_STDBY_ANGLE);
+}
 
 void setup() {
   digitalWrite(LED_BUILTIN, LED_ON);
@@ -80,15 +107,11 @@ void setup() {
   
   ntc_voltage_prime = analogRead(NTC_PIN_PRIME);
   ntc_voltage_second = analogRead(NTC_PIN_SECOND);
-
-  temperature = coeff_4 * pow(ntc_voltage_prime, 4)
-              + coeff_3 * pow(ntc_voltage_prime, 3)
-              + coeff_2 * pow(ntc_voltage_prime, 2)
-              + coeff_1 * ntc_voltage_prime
-              + coeff_0;
+  temperature_prime = volt_to_temp(ntc_voltage_prime);
+  temperature_second = volt_to_temp(ntc_voltage_second);
 
   digitalWrite(LED_BUILTIN, LED_OFF);
-  mode = DEBUG; // <----------------------------------------------- change here
+  mode = NORMAL; // <----------------------------------------------- change here
 }
 
 void loop() {
@@ -98,25 +121,33 @@ void loop() {
     /* get new temperature: */
     ntc_voltage_prime = analogRead(NTC_PIN_PRIME);
     ntc_voltage_second = analogRead(NTC_PIN_SECOND);
-    last_temperature = temperature;
-    temperature = coeff_4 * pow(ntc_voltage_prime, 4)
-                + coeff_3 * pow(ntc_voltage_prime, 3)
-                + coeff_2 * pow(ntc_voltage_prime, 2)
-                + coeff_1 * ntc_voltage_prime
-                + coeff_0;
-    temperature = (last_temperature + temperature) / 2;
-    // Serial.println(temperature);
+    last_temperature_prime = temperature_prime;
+    last_temperature_second = temperature_second;
+
+    /* prime sensor: */
+    temperature_prime = volt_to_temp(ntc_voltage_prime);
+    temperature_prime = (last_temperature_prime + temperature_prime) / 2;
+
+    /* second sensor: */
+    temperature_second = volt_to_temp(ntc_voltage_second);
+    temperature_second = (last_temperature_second + temperature_second) / 2;
     
     switch(mode)
     {
     case DEBUG:
-      Serial.println("ntc_voltage_prime ntc_voltage_second"); // temperature");
-      Serial.print(String(ntc_voltage_prime) + String(" "));
-      Serial.println(String(ntc_voltage_second));
-      //Serial.print(String(temperature) + String(" "));
+      Serial.println("temperature_second temperature_prime");
+      Serial.print(String(temperature_second) + String(" "));
+      Serial.println(String(temperature_prime));
       break;
 
     case NORMAL:
+
+      #ifdef DEBUG_LOG
+      Serial.println("temperature_second temperature_prime");
+      Serial.print(String(temperature_second) + String(" "));
+      Serial.println(String(temperature_prime));
+      #endif
+
       /* reset statemachine if button is pressed: */
       button_state = digitalRead(BUTTON_PIN);
       if (button_pause == 0 && button_state == 0){
@@ -126,31 +157,29 @@ void loop() {
       else if (button_pause == 1 && button_state == 1){
         button_pause = 0;
       }
-
       
       /* statemachine: */
       switch (state)
       {
       case SETUP:
+        #ifdef DEBUG_LOG
         Serial.println("SETUP");
-
-        theservo.write(SERV_ON_ANGLE);
-        delay(delay_mill);
-        theservo.write(SERV_STDBY_ANGLE);
-
+        #endif
+        heater_on();
         state = FIRST_HEATING;
         break;
         
       case FIRST_HEATING:
         digitalWrite(LED_BUILTIN, LED_ON);
+        #ifdef DEBUG_LOG
         Serial.println("FIRST_HEATING");
-        if (temperature > 76.0){
+        #endif
+        if (temperature_prime > FIRST_HEATING_BOUND){
 
-          theservo.write(SERV_OFF_ANGLE);
-          delay(delay_mill);
-          theservo.write(SERV_STDBY_ANGLE);
+          heater_off();
+
           digitalWrite(PEEP_PIN,HIGH);
-          delay(1000);
+          delay(2000);
           digitalWrite(PEEP_PIN,LOW);
 
           state = FIRST_SETTLING; 
@@ -159,50 +188,66 @@ void loop() {
 
       case FIRST_SETTLING:
         digitalWrite(LED_BUILTIN, LED_OFF);
+        #ifdef DEBUG_LOG
         Serial.println("FIRST_SETTLING");
-        if (temperature > 80.0){
-
-          theservo.write(SERV_OFF_ANGLE);
-          delay(delay_mill);
-          theservo.write(SERV_STDBY_ANGLE);
-
+        #endif
+        if (temperature_prime > FIRST_SETTLING_HIGH_BOUND){
           state = COOLING; 
         }
-        if(temperature < 76.0){
-          
-          theservo.write(SERV_ON_ANGLE);
-          delay(delay_mill);
-          theservo.write(SERV_STDBY_ANGLE);
-
+        if(temperature_prime < FIRST_SETTLING_LOW_BOUND){
+          heater_on();
           state = HEATING;
         }
         break;
       
       case COOLING:
         digitalWrite(LED_BUILTIN, LED_OFF);
+        #ifdef DEBUG_LOG
         Serial.println("COOLING");
-        if (temperature < LOW_BOUND){
-
-          theservo.write(SERV_ON_ANGLE);
-          delay(delay_mill);
-          theservo.write(SERV_STDBY_ANGLE);
-
+        #endif
+        if (temperature_prime < LOW_BOUND){
+          heater_on();
           state = HEATING; 
         }
         break;
 
       case HEATING:
         digitalWrite(LED_BUILTIN, LED_ON);
+        #ifdef DEBUG_LOG
         Serial.println("HEATING");
-        if (temperature > HIGH_BOUND){
-
-          theservo.write(SERV_OFF_ANGLE);
-          delay(delay_mill);
-          theservo.write(SERV_STDBY_ANGLE);
-
+        #endif
+        heating_cnt++;
+        
+        if (temperature_prime > HIGH_BOUND){
+          heater_off();
           state = COOLING; 
         }
+        else if (heating_cnt > HEATING_CNT_NUMBER){
+          heating_cnt = 0;
+          heater_off();
+          state = AFTER_HEAT_WAITING; 
+        }
+
         break;
+
+      case AFTER_HEAT_WAITING:
+        digitalWrite(LED_BUILTIN, LED_OFF);
+        #ifdef DEBUG_LOG
+        Serial.println("AFTER_HEAT_WAITING");
+        #endif
+        after_heating_wait_cnt++;
+        if(after_heating_wait_cnt > AFTER_HEAT_WAIT_CNT_NUMBER){
+          after_heating_wait_cnt = 0;
+          if (temperature_prime > HIGH_BOUND){
+            state = COOLING; 
+          }
+          else if (temperature_prime <= HIGH_BOUND){
+            heater_on();
+            state = HEATING;
+          }
+        }
+        break;
+
 
       default:
         theservo.write(SERV_STDBY_ANGLE);
